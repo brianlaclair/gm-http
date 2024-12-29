@@ -1,11 +1,23 @@
-// gm-http by Brian LaClair
-// https://github.com/brianlaclair/gm-http
+// gm-http (v1.0) a simple HTTP server for GameMaker
+// MIT License - Copyright (c) 2024 Brian LaClair
+// Repository at: https://github.com/brianlaclair/gm-http
+// Contributions encouraged!
 
+/**
+* Represents an HTTP server with connection handling.
+* @constructor
+*/
 function http () constructor {
 
     instance    = undefined;
     connections = [];
 
+    /**
+    * Starts listening on the specified port.
+    * @function listen
+    * @param {real} port - The port number to listen on.
+    * @returns {real} The server instance identifier.
+    */
     listen = function ( port )
     {
         if (!is_undefined(instance)) { remove(); }
@@ -13,6 +25,10 @@ function http () constructor {
         return self.instance;
     }
 
+    /**
+    * Stops the server and clears all connections.
+    * @function remove
+    */  
     remove = function ()
     {
         network_destroy(self.instance);
@@ -22,6 +38,11 @@ function http () constructor {
         array_delete(self.connections, 0, array_length(self.connections));
     }
 
+    /**
+    * Intercepts a network event and processes the connection or data accordingly.
+    * @function intercept
+    * @returns {struct|undefined} The connection object associated with the intercepted event, or undefined if none.
+    */
     intercept = function () 
     {
         
@@ -59,16 +80,24 @@ function http () constructor {
 
     }
 
+    /**
+    * Removes closed or inactive connections.
+    * @function reap
+    */
     reap = function () 
     {
         for (i = 0; i < array_length(self.connections); i++) {
             if (self.connections[i].socket == -1) {
                 array_delete(self.connections, i, 1);
-                show_debug_message("Reaped a connection");
             }
         }
     }
-
+    
+    /**
+    * Represents a single network connection.
+    * @constructor
+    * @param {real} sock - The socket identifier for the connection.
+    */
     connection = function (sock) constructor
     {
         socket          = sock;
@@ -78,6 +107,11 @@ function http () constructor {
         body            = false;
         request         = { body : "" };
 
+        /**
+        * Parses an incoming HTTP request string.
+        * @function parseRequest
+        * @param {string} requestString - The raw HTTP request string.
+        */
         parseRequest = function ( requestString ) {
             var requestLines        = string_split(requestString, "\n");
 
@@ -111,6 +145,13 @@ function http () constructor {
             self.hasRequest = true;
         }
 
+        /**
+        * Sends an HTTP response to the client.
+        * @function respond
+        * @param {real} [status=404] - The HTTP status code.
+        * @param {string} [content=""] - The response body content.
+        * @param {array<array<string>>} [headers=[]] - Custom headers to include in the response.
+        */
         respond = function (status = 404, content = "", headers = []) {
             // Start the header
             var header = "HTTP/1.1 " + string(status) + " " + http.__getStatusText(status) + http.EOL;
@@ -162,14 +203,38 @@ function http () constructor {
             buffer_delete(send_buffer);
         }
 
+        /**
+        * Closes the connection and marks it as disconnected.
+        * @function remove
+        */
         remove = function () {
             network_destroy(self.socket);
             self.socket = -1;
             self.disconnectTime = current_time;
         }
 
+        /**
+        * Checks if the request has a specific header or property.
+        * @function has
+        * @param {string} key - The property key to check for.
+        * @returns {boolean} True if the key exists, false otherwise.
+        */
         has = function (key) {
             return struct_exists(self.request, key);
+        }
+        
+        /**
+        * Checks if the request has a specific header or property and returns it, or undefined
+        * @function has
+        * @param {string} key - The property key to retrieve
+        * @returns {string|undefined} String if the key exists, undefined otherwise.
+        */
+        get = function (key) {
+            if (self.has(key)) {
+                return struct_get(self.request, key);
+            }
+            
+            return undefined;
         }
     }
 
@@ -286,3 +351,5 @@ function http () constructor {
 
     #endregion
 }
+
+
