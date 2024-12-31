@@ -9,8 +9,8 @@
  
 ## Getting Started
 
- 1. Clone this repository or copy `http.gml`
- 2. Drop `http.gml` into your project
+ 1. Grab the [latest release](https://github.com/brianlaclair/gm-http/releases) or clone this repository
+ 2. Import the package (or drop `http.gml` into your project)
  3. You're ready to go!
 
 ##  Basic Usage
@@ -37,7 +37,7 @@ var connection = server.intercept();
 
 if (!is_undefined(connection) && connection.hasRequest) {
     // Check the requested URI
-    if (connection.request.uri == "/example") {
+    if (connection.get("uri") == "/example") {
         // Respond with a custom message
         connection.respond(200, "Hello, World!");
     } else {
@@ -88,11 +88,13 @@ The connection() constructor contains all data related to a connection, stored i
 
 |Variable| Value | Explanation |
 |--|--|--|
+| connectionId | Unique ID of the connection | A consistent ID for the connection throughout and after it's lifetime |
 | socket | Network Socket ID (real) | The socket that this connection is on |
 | connectTime | current_time at connection start (real) | The precise moment when the connection started |
 | disconnectTime | current_time at connection end (real) OR undefined | The precise moment when the connection ended |
+|connected|boolean| Whether or not this connection is currently active
 | hasRequest | boolean | If the connection has a request or not |
-| body | boolean | If the request parser has switched from writing headers to writing into the body of the message |
+| body | boolean | Largely for internal use - if the request parser has switched from writing headers to writing into the body of the message |
 | request | struct | Contains all request attributes and a request body if applicable |
 
 While you can use these to directly manipulate the connection, and ultimately add more variables to store with the specific connection, there are a number of methods that assist with connection handling available on any connection() instance:
@@ -101,9 +103,23 @@ While you can use these to directly manipulate the connection, and ultimately ad
 |--|--|--|--|
 |has()| request attribute (string)| boolean | Check if an attribute exists in the current request. Example: `connection.has("method")`|
 |get()| request attribute (string)| string / undefined | Return a value from the request, if it exists. Example: `connection.get("method")` might return `GET`, `POST`, etc. or `undefined` if it has not yet been set |
-| respond() | [HTTP Status Code](https://www.iana.org/assignments/http-status-codes/http-status-codes.xhtml) (int, default `404`), content (string, default empty), headers (array, default empty)|[none]|This method builds and sends a valid HTTP response to the connection with a status code, body, and overwrite-able default header segment (see below for more on custom headers)
+| respond() | [HTTP Status Code](https://www.iana.org/assignments/http-status-codes/http-status-codes.xhtml) (int, default `404`), content (string, default empty), headers (array, default empty), flush (boolean, default true)|[none]|This method builds and sends a valid HTTP response to the connection with a status code, body, and overwrite-able default header segment (see below for more on custom headers). The flush property defines if the current request will be cleared automatically when you respond.
 | remove() | [none] | [none] | While a client disconnect will make the connection stale, in certain scenarios you may wish to "hang up" on a connection from the server side. |
 | parseRequest() | HTTP Request (string) | [none] | Builds the connection's `request` struct from a string. In most cases, you do not need to call this method directly as [http].intercept will do it for you. | 
+
+### Requests
+When a connection has a fully formed request, it's `hasRequest` attribute returns true. All valid requests will have:
+
+ - `request.uri` - Uniform Resource Identifier, like "/index.html" or
+   "/images/my_cool_picture.jpg"
+- `request.method` - The method which the request is utilizing (`GET`, `POST`, `PUT`, etc)
+- `request.version` - The HTTP version being requested by the client
+
+These attributes (and usually other headers) live in the `request` struct of a `connection` instance when that instance `hasRequest`. The `.has()` and `.get()` methods provide simple ways to interact with the `request` struct.
+
+By design, all gm-http `connection.request` structs contain a `body` entry - by design of HTTP, it is rare (and ultimately very non-standard) to have any body content for request methods like `GET`, but in any method that would expect a body (like `POST`), the `request.body` entry is represented as a string.
+
+Currently gm-http does not handle any parsing of the body content for you, but this may be an area of future additions built into the library.
 
 ### Response Headers
 gm-http defines a default set of response HTTP headers below your response status, specifically these ones:
@@ -113,7 +129,8 @@ Date: [current formatted time]
 Server: GMHTTP/1.0
 Content-Type: text/html; charset=utf-8
 Content-Length: [the byte length of your supplied content]
-Connection: close
+Connection: Keep-Alive
+Keep-Alive: timeout=15
 ```
 However, all of these are modifiable, and you're able to set additional headers on a per-response basis.
 For example, if I wanted to specify that I'm responding with a JSON payload I could do the following:
@@ -128,6 +145,8 @@ You can also set parameters on custom headers like so:
 connection.respond(200, my_json_string, [["Content-Type", ["application/json", "parameter=totally normal"]]])
 ```
 which would output as `Content-Type: application/json; parameter=totally normal`
+
+Note the structure of the custom header array is an array of arrays.
 
 The custom headers array input will take an unlimited amount of array entries, so you can set any header value you like - including `Set-Cookie` entries for session management.
 
