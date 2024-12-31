@@ -1,4 +1,4 @@
-// gm-http (v1.0) a simple HTTP server for GameMaker
+// gm-http (v1.0.1) a simple HTTP server for GameMaker
 // MIT License - Copyright (c) 2024 Brian LaClair
 // Repository at: https://github.com/brianlaclair/gm-http
 // Contributions encouraged!
@@ -9,8 +9,9 @@
 */
 function http () constructor {
 
-    instance    = undefined;
-    connections = [];
+    instance            = undefined;
+    connections         = [];
+    connectionSequence  = 0;
 
     /**
     * Starts listening on the specified port.
@@ -20,7 +21,7 @@ function http () constructor {
     */
     listen = function ( port )
     {
-        if (!is_undefined(instance)) { remove(); }
+        if (!is_undefined(instance)) { self.remove(); }
         self.instance = network_create_server_raw(network_socket_tcp, port, 999);
         return self.instance;
     }
@@ -54,14 +55,15 @@ function http () constructor {
             
             case network_type_connect:
                 // Create the connection
-                var conn = new connection(async_load[? "socket"]);
+                var conn = new connection(async_load[? "socket"], self.connectionSequence);
+                self.connectionSequence++;
                 connection_index = array_length(self.connections);
                 array_push(self.connections, conn);
                 break;
             
             case network_type_data:
                 // Find the correct connection and load data from the buffer
-                connection_index = self.__findConnection(async_load[? "id"]); 
+                connection_index = self.__findConnection(async_load[? "id"]);
                 var rawData = buffer_read(async_load[? "buffer"], buffer_string);
 
                 // Parse the request
@@ -70,6 +72,7 @@ function http () constructor {
 
             case network_type_disconnect:
                 connection_index = self.__findConnection(async_load[? "socket"]);
+                self.connections[connection_index].connected      = false;
                 self.connections[connection_index].disconnectTime = current_time;
                 self.connections[connection_index].socket         = -1;
                 break;
@@ -81,14 +84,15 @@ function http () constructor {
     }
 
     /**
-    * Removes closed or inactive connections.
+    * Removes closed connections.
     * @function reap
     */
     reap = function () 
     {
-        for (i = 0; i < array_length(self.connections); i++) {
+        for (var i = 0; i < array_length(self.connections); i++) {
             if (self.connections[i].socket == -1) {
                 array_delete(self.connections, i, 1);
+                i--;
             }
         }
     }
@@ -98,14 +102,16 @@ function http () constructor {
     * @constructor
     * @param {real} sock - The socket identifier for the connection.
     */
-    connection = function (sock) constructor
+    connection = function (sock, id = undefined) constructor
     {
-        socket          = sock;
-        connectTime     = current_time;
-        disconnectTime  = undefined;
-        hasRequest      = false;
-        body            = false;
-        request         = { body : "" };
+        connectionId        = id;
+        socket              = sock;
+        connected           = true;
+        connectTime         = current_time;
+        disconnectTime      = undefined;
+        hasRequest          = false;
+        body                = false;
+        request             = { body : "" };
 
         /**
         * Parses an incoming HTTP request string.
@@ -125,24 +131,41 @@ function http () constructor {
             }
 
             // Parse the rest of the headers, and then any body that was included
-            for (i = 0; i < array_length(requestLines); i++) {
-
-            if (!self.body && string_trim(requestLines[i]) == "") {
-                self.body = true;
-            }
-
-            if (!self.body) {
-                var line = string_split(requestLines[i], ":");
-
-                // TODO: header values should break down into arrays, similar to how they are set on output
-                struct_set(self.request, string_lower(string_trim(line[0])), string_trim(line[1]));
-            } else {
-                self.request.body += requestLines[i] + "\n";
-            }
+            for (var i = 0; i < array_length(requestLines); i++) {
+                if (!self.body && string_trim(requestLines[i]) == "") {
+                    self.body = true;
+                    continue;
+                }
+    
+                if (!self.body) {
+                    var line = string_split(requestLines[i], ":");
+    
+                    // TODO: header values should break down into arrays, similar to how they are set on output
+                    struct_set(self.request, string_lower(string_trim(line[0])), string_trim(line[1]));
+                } else {
+                    var last = "\n";
+                    if (i == (array_length(requestLines) - 1)) {
+                        last = "";
+                    }
+                    self.request.body += requestLines[i] + last;
+                }
             }
             
-            // TODO: add logic for content-length and chunking
-            self.hasRequest = true;
+            // TODO: add logic for chunking
+            // Check if the request's content-length has been met, signifying the request is complete...
+            if (self.has("Content-Length")) {
+                var target  = int64(self.get("Content-Length"));
+                var current = string_byte_length(self.get("body")); 
+
+                show_debug_message(target);
+                show_debug_message(current);
+
+                if (current >= target) {
+                    self.hasRequest = true;
+                }
+            } else {
+                self.hasRequest = true;
+            }
         }
 
         /**
@@ -151,8 +174,9 @@ function http () constructor {
         * @param {real} [status=404] - The HTTP status code.
         * @param {string} [content=""] - The response body content.
         * @param {array<array<string>>} [headers=[]] - Custom headers to include in the response.
+        * @param {boolean} [flush=true] - Specify if the connection's current request should be removed after responding.  
         */
-        respond = function (status = 404, content = "", headers = []) {
+        respond = function (status = 404, content = "", headers = [], flush = true) {
             // Start the header
             var header = "HTTP/1.1 " + string(status) + " " + http.__getStatusText(status) + http.EOL;
         
@@ -166,27 +190,31 @@ function http () constructor {
                 ["Server", "GMHTTP/1.0"],
                 ["Content-Type", ["text/html", "charset=utf-8"]],
                 ["Content-Length", string(string_byte_length(content))],
-                ["Connection", "close"]
+                ["Connection", "Keep-Alive"],
+                ["Keep-Alive", "timeout=15"]
             ]
     
             // Insert custom header attributes and overwrite where needed
-            for (i = 0; i < array_length(headers); i++) {
+            for (var i = 0; i < array_length(headers); i++) {
                 // Ensure that the custom header meets the criteria
-                if !(array_length(headers[i]) == 2) {
+                if !(is_array(headers[i]) && array_length(headers[i]) == 2) {
+                    array_delete(headers, i, 1);
+                    i--;
                     continue;
                 }
     
                 // Remove any collisions from the standard header
-                for (h = 0; h < array_length(headerMap); h++) {
-                    if (headerMap[h][0] == headers[i][0]) {
+                for (var h = 0; h < array_length(headerMap); h++) {
+                    if (string_lower(headerMap[h][0]) == string_lower(headers[i][0])) {
                         array_delete(headerMap, h, 1);
+                        h--;
                     }
                 }
             }
     
             headerMap = array_concat(headerMap, headers);
     
-            for (i = 0; i < array_length(headerMap); i++) {
+            for (var i = 0; i < array_length(headerMap); i++) {
                 var attribute   = string(headerMap[i][0]);
                 var value       = is_array(headerMap[i][1]) ? string_join_ext("; ", headerMap[i][1]) : string(headerMap[i][1]);
                 header += attribute + ": " + value + http.EOL;
@@ -201,6 +229,13 @@ function http () constructor {
             var send_size = buffer_get_size(send_buffer);
             network_send_raw(self.socket, send_buffer, send_size);
             buffer_delete(send_buffer);
+            
+            // Automatically clear the connection's request
+            if (flush) {
+                self.hasRequest = false;
+                self.body       = false;
+                self.request    = { body:"" };
+            }
         }
 
         /**
@@ -220,7 +255,7 @@ function http () constructor {
         * @returns {boolean} True if the key exists, false otherwise.
         */
         has = function (key) {
-            return struct_exists(self.request, key);
+            return struct_exists(self.request, string_lower(key));
         }
         
         /**
@@ -231,7 +266,7 @@ function http () constructor {
         */
         get = function (key) {
             if (self.has(key)) {
-                return struct_get(self.request, key);
+                return struct_get(self.request, string_lower(key));
             }
             
             return undefined;
