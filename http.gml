@@ -1,4 +1,4 @@
-// gm-http (v1.0.1) a simple HTTP server for GameMaker
+// gm-http (v1.0.2) a simple HTTP server for GameMaker
 // MIT License - Copyright (c) 2024 Brian LaClair
 // Repository at: https://github.com/brianlaclair/gm-http
 // Contributions encouraged!
@@ -46,7 +46,8 @@ function http () constructor {
     */
     intercept = function () 
     {
-        
+        show_debug_message("The intercept event has fired...");    
+
         var type                = async_load[? "type"];
         var request             = {};
         var connection_index    = undefined;
@@ -63,8 +64,9 @@ function http () constructor {
             
             case network_type_data:
                 // Find the correct connection and load data from the buffer
+                show_debug_message("Incoming Data Connection...");
                 connection_index = self.__findConnection(async_load[? "id"]);
-                var rawData = buffer_read(async_load[? "buffer"], buffer_string);
+                var rawData = buffer_read(async_load[? "buffer"], buffer_text);
 
                 // Parse the request
                 self.connections[connection_index].parseRequest(rawData);
@@ -110,63 +112,81 @@ function http () constructor {
         connectTime         = current_time;
         disconnectTime      = undefined;
         hasRequest          = false;
-        body                = false;
-        request             = { body : "" };
+        bodyStarted         = false;
+        request             = { body : "", rawData: "" };
 
         /**
         * Parses an incoming HTTP request string.
         * @function parseRequest
         * @param {string} requestString - The raw HTTP request string.
         */
-        parseRequest = function ( requestString ) {
-            var requestLines        = string_split(requestString, "\n");
-
-            // The first line follows a different format
-            if (!self.body) {
-                var requestLine         = array_shift(requestLines);
-                var requestLineArray    = string_split(requestLine, " ");
-                self.request.method     = requestLineArray[0] ?? undefined;
-                self.request.uri        = requestLineArray[1] ?? undefined;
-                self.request.version    = requestLineArray[2] ?? undefined; 
+        parseRequest = function (requestString) {
+            show_debug_message($"Request data is coming in on connection {connectionId}");
+          
+            // Accumulate incoming data
+            if (is_undefined(self.request.rawData)) {
+                self.request.rawData = "";
             }
 
-            // Parse the rest of the headers, and then any body that was included
-            for (var i = 0; i < array_length(requestLines); i++) {
-                if (!self.body && string_trim(requestLines[i]) == "") {
-                    self.body = true;
-                    continue;
-                }
-    
-                if (!self.body) {
-                    var line = string_split(requestLines[i], ":");
-    
-                    // TODO: header values should break down into arrays, similar to how they are set on output
-                    struct_set(self.request, string_lower(string_trim(line[0])), string_trim(line[1]));
-                } else {
-                    var last = "\n";
-                    if (i == (array_length(requestLines) - 1)) {
-                        last = "";
-                    }
-                    self.request.body += requestLines[i] + last;
-                }
+            self.request.rawData += requestString;
+          
+            // If we're still in the header phase, process headers
+            if (!self.bodyStarted) { 
+                var headerEndPos = string_pos("\r\n\r\n", self.request.rawData);
+          
+                if (headerEndPos > 0) {
+                    // Extract headers and transition to body parsing
+                    var headerPart = string_copy(self.request.rawData, 1, headerEndPos);
+                    var bodyPart = string_copy(self.request.rawData, headerEndPos + 4, string_length(self.request.rawData) - headerEndPos - 4);
+
+                    self.parseHeaders(headerPart);
+                    self.bodyStarted = true;
+
+                    // Start accumulating body data
+                    self.request.body = bodyPart;
+              } 
+            } else { 
+                // Accumulate additional body data
+                self.request.body += requestString;
             }
-            
-            // TODO: add logic for chunking
-            // Check if the request's content-length has been met, signifying the request is complete...
-            if (self.has("Content-Length")) {
-                var target  = int64(self.get("Content-Length"));
-                var current = string_byte_length(self.get("body")); 
-
-                show_debug_message(target);
-                show_debug_message(current);
-
-                if (current >= target) {
+          
+          // Check if the body is complete
+            if (self.bodyStarted && self.has("Content-Length")) {
+                var targetLength = int64(self.get("Content-Length"));
+                var currentLength = string_byte_length(self.request.body + "\n");
+          
+                show_debug_message($"Connection {connectionId} request loading: {(currentLength / targetLength) * 100}% (current: { currentLength } vs target: { targetLength })");
+          
+                if (currentLength >= targetLength) {
                     self.hasRequest = true;
                 }
-            } else {
-                self.hasRequest = true;
+            } else if (self.bodyStarted) {
+              // No Content-Length specified, consider the request complete
+              self.hasRequest = true;
             }
-        }
+          
+            show_debug_message("Finished request method");
+        };
+
+        parseHeaders = function (headerString) {
+            var lines = string_split(headerString, "\r\n");
+
+            // Process request line
+            var requestLine = array_shift(lines);
+            var requestLineArray = string_split(requestLine, " ");
+            self.request.method = requestLineArray[0] ?? undefined;
+            self.request.uri = requestLineArray[1] ?? undefined;
+            self.request.version = requestLineArray[2] ?? undefined;
+
+            // Process headers
+            for (var i = 0; i < array_length(lines); i++) {
+                var line = string_split(lines[i], ":");
+                if (array_length(line) == 2) {
+                    struct_set(self.request, string_lower(string_trim(line[0])), string_trim(line[1]));
+                }
+            }
+        };
+
 
         /**
         * Sends an HTTP response to the client.
@@ -232,9 +252,9 @@ function http () constructor {
             
             // Automatically clear the connection's request
             if (flush) {
-                self.hasRequest = false;
-                self.body       = false;
-                self.request    = { body:"" };
+                self.hasRequest     = false;
+                self.bodyStarted    = false;
+                self.request        = { body:"", rawData:"" };
             }
         }
 
@@ -278,70 +298,11 @@ function http () constructor {
     static EOL = "\r\n";
 
     static statusCodes = [
-        { code: 100, text: "Continue" },
-        { code: 101, text: "Switching Protocols" },
-        { code: 102, text: "Processing" },
-        { code: 103, text: "Early Hints"},
-        { code: 200, text: "OK" },
-        { code: 201, text: "Created" },
-        { code: 202, text: "Accepted" },
-        { code: 203, text: "Non-Authoritative Information" },
-        { code: 204, text: "No Content" },
-        { code: 205, text: "Reset Content" },
-        { code: 206, text: "Partial Content" },
-        { code: 207, text: "Multi-Status" },
-        { code: 208, text: "Already Reported" },
-        { code: 226, text: "IM Used" },
-        { code: 300, text: "Multiple Choices" },
-        { code: 301, text: "Moved Permanently" },
-        { code: 302, text: "Found" },
-        { code: 303, text: "See Other" },
-        { code: 304, text: "Not Modified" },
-        { code: 305, text: "Use Proxy" },
-        { code: 306, text: "Switch Proxy" },
-        { code: 307, text: "Temporary Redirect" },
-        { code: 308, text: "Permanent Redirect" },
-        { code: 400, text: "Bad Request" },
-        { code: 401, text: "Unauthorized" },
-        { code: 402, text: "Payment Required" },
-        { code: 403, text: "Forbidden" },
-        { code: 404, text: "Not Found" },
-        { code: 405, text: "Method Not Allowed" },
-        { code: 406, text: "Not Acceptable" },
-        { code: 407, text: "Proxy Authentication Required" },
-        { code: 408, text: "Request Timeout" },
-        { code: 409, text: "Conflict" },
-        { code: 410, text: "Gone" },
-        { code: 411, text: "Length Required" },
-        { code: 412, text: "Precondition Failed" },
-        { code: 413, text: "Payload Too Large" },
-        { code: 414, text: "URI Too Long" },
-        { code: 415, text: "Unsupported Media Type" },
-        { code: 416, text: "Range Not Satisfiable" },
-        { code: 417, text: "Expectation Failed" },
-        { code: 418, text: "I'm a Teapot" },
-        { code: 421, text: "Misdirected Request" },
-        { code: 422, text: "Unprocessable Entity" },
-        { code: 423, text: "Locked" },
-        { code: 424, text: "Failed Dependency" },
-        { code: 425, text: "Too Early" },
-        { code: 426, text: "Upgrade Required" },
-        { code: 428, text: "Precondition Required" },
-        { code: 429, text: "Too Many Requests" },
-        { code: 431, text: "Request Header Fields Too Large" },
-        { code: 451, text: "Unavailable For Legal Reasons" },
-        { code: 500, text: "Internal Server Error" },
-        { code: 501, text: "Not Implemented" },
-        { code: 502, text: "Bad Gateway" },
-        { code: 503, text: "Service Unavailable" },
-        { code: 504, text: "Gateway Timeout" },
-        { code: 505, text: "HTTP Version Not Supported" },
-        { code: 506, text: "Variant Also Negotiates" },
-        { code: 507, text: "Insufficient Storage" },
-        { code: 508, text: "Loop Detected" },
-        { code: 509, text: "Bandwidth Limit Exceeded" },
-        { code: 510, text: "Not Extended" },
-        { code: 511, text: "Network Authentication Required" },
+        { code: 100, text: "Continue" }, { code: 101, text: "Switching Protocols" }, { code: 102, text: "Processing" }, { code: 103, text: "Early Hints"},
+        { code: 200, text: "OK" }, { code: 201, text: "Created" }, { code: 202, text: "Accepted" }, { code: 203, text: "Non-Authoritative Information" }, { code: 204, text: "No Content" }, { code: 205, text: "Reset Content" }, { code: 206, text: "Partial Content" }, { code: 207, text: "Multi-Status" }, { code: 208, text: "Already Reported" }, { code: 226, text: "IM Used" },
+        { code: 300, text: "Multiple Choices" }, { code: 301, text: "Moved Permanently" }, { code: 302, text: "Found" }, { code: 303, text: "See Other" }, { code: 304, text: "Not Modified" }, { code: 305, text: "Use Proxy" }, { code: 306, text: "Switch Proxy" }, { code: 307, text: "Temporary Redirect" }, { code: 308, text: "Permanent Redirect" },
+        { code: 400, text: "Bad Request" }, { code: 401, text: "Unauthorized" }, { code: 402, text: "Payment Required" }, { code: 403, text: "Forbidden" }, { code: 404, text: "Not Found" }, { code: 405, text: "Method Not Allowed" }, { code: 406, text: "Not Acceptable" }, { code: 407, text: "Proxy Authentication Required" }, { code: 408, text: "Request Timeout" }, { code: 409, text: "Conflict" }, { code: 410, text: "Gone" }, { code: 411, text: "Length Required" }, { code: 412, text: "Precondition Failed" }, { code: 413, text: "Payload Too Large" }, { code: 414, text: "URI Too Long" }, { code: 415, text: "Unsupported Media Type" }, { code: 416, text: "Range Not Satisfiable" }, { code: 417, text: "Expectation Failed" }, { code: 418, text: "I'm a Teapot" }, { code: 421, text: "Misdirected Request" }, { code: 422, text: "Unprocessable Entity" }, { code: 423, text: "Locked" }, { code: 424, text: "Failed Dependency" }, { code: 425, text: "Too Early" }, { code: 426, text: "Upgrade Required" }, { code: 428, text: "Precondition Required" }, { code: 429, text: "Too Many Requests" }, { code: 431, text: "Request Header Fields Too Large" }, { code: 451, text: "Unavailable For Legal Reasons" },
+        { code: 500, text: "Internal Server Error" }, { code: 501, text: "Not Implemented" }, { code: 502, text: "Bad Gateway" }, { code: 503, text: "Service Unavailable" }, { code: 504, text: "Gateway Timeout" }, { code: 505, text: "HTTP Version Not Supported" }, { code: 506, text: "Variant Also Negotiates" }, { code: 507, text: "Insufficient Storage" }, { code: 508, text: "Loop Detected" }, { code: 509, text: "Bandwidth Limit Exceeded" }, { code: 510, text: "Not Extended" }, { code: 511, text: "Network Authentication Required" },
     ];
 
     static __findConnection = function (sock) {
@@ -367,7 +328,6 @@ function http () constructor {
         var minute   = string_format(current_minute, 2, 0); // Zero-padded 2-digit minute
         var second   = string_format(current_second, 2, 0); // Zero-padded 2-digit second
         
-            
         // Construct the formatted string
         var datetime = day + ", " + string(date) + " " + month + " " + string(year) + " " + hour + ":" + minute + ":" + second + " GMT";
         
@@ -386,5 +346,3 @@ function http () constructor {
 
     #endregion
 }
-
-
