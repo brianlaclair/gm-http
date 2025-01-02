@@ -379,7 +379,7 @@ function http (_verbose = false) constructor {
         * @returns {bool} True if the key exists, false otherwise.
         */
         has = function (key) { 
-            var _struct = struct_get(self, "request");
+            var _struct = self.request;
             
             if (string_count(".", key)) {
                 var _search = string_split(key, ".", false, 1);
@@ -387,6 +387,10 @@ function http (_verbose = false) constructor {
                     _struct = struct_get(_struct, _search[0]);
                     key     = _search[1];
                 }
+            }
+            
+            if (is_undefined(_struct)) {
+                return false;
             }
 
             return struct_exists(_struct, string_lower(key));
@@ -401,7 +405,7 @@ function http (_verbose = false) constructor {
         get = function (key) {
             
             if (self.has(key)) {
-                var _struct = struct_get(self, "request");   
+                var _struct = self.request;   
 
                 if (string_count(".", key)) {
                     var _search = string_split(key, ".", false, 1);
