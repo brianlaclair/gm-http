@@ -1,28 +1,47 @@
-// gm-http (v1.0.2) a simple HTTP server for GameMaker
+// gm-http (v1.1.0) a simple HTTP server for GameMaker
 // MIT License - Copyright (c) 2024 Brian LaClair
 // Repository at: https://github.com/brianlaclair/gm-http
 // Contributions encouraged!
 
 /**
 * Represents an HTTP server with connection handling.
-* @constructor
+* @constructor 
+* @param {bool} [_verbose=false] - Output messages via show_debug_message
 */
-function http () constructor {
+function http (_verbose = false) constructor {
 
     instance            = undefined;
     connections         = [];
     connectionSequence  = 0;
+    log                 = [];
+    verbose             = _verbose;
+
+    logger = function ( message )
+    {
+        if (!is_string(message)) {
+            message = json_stringify(message);
+        }
+        var _message = $"[HTTP @ { current_time }] { message }";
+        array_push(self.log, _message);
+        if (self.verbose) {
+            show_debug_message(_message);
+        }
+    }
 
     /**
     * Starts listening on the specified port.
     * @function listen
     * @param {real} port - The port number to listen on.
-    * @returns {real} The server instance identifier.
+    * @returns {real|undefined} The server instance identifier.
     */
     listen = function ( port )
     {
         if (!is_undefined(instance)) { self.remove(); }
-        self.instance = network_create_server_raw(network_socket_tcp, port, 999);
+        var _listener   = network_create_server_raw(network_socket_tcp, port, 999);
+        self.instance   = (_listener >= 0) ? _listener : undefined;
+
+        var _loggerMsg  = is_undefined(self.instance) ? $"Could not start listener on port { port }" : $"Started listener on port { port }"; 
+        logger(_loggerMsg);
         return self.instance;
     }
 
@@ -32,11 +51,10 @@ function http () constructor {
     */  
     remove = function ()
     {
+        array_delete(self.connections, 0, array_length(self.connections));
         network_destroy(self.instance);
         self.instance = undefined;
-
-        // Clear all connections
-        array_delete(self.connections, 0, array_length(self.connections));
+        logger("Removed listener")
     }
 
     /**
@@ -46,8 +64,6 @@ function http () constructor {
     */
     intercept = function () 
     {
-        show_debug_message("The intercept event has fired...");    
-
         var type                = async_load[? "type"];
         var request             = {};
         var connection_index    = undefined;
@@ -56,6 +72,7 @@ function http () constructor {
             
             case network_type_connect:
                 // Create the connection
+                logger($"({ self.connectionSequence }) Initiated connection");
                 var conn = new connection(async_load[? "socket"], self.connectionSequence);
                 self.connectionSequence++;
                 connection_index = array_length(self.connections);
@@ -64,12 +81,15 @@ function http () constructor {
             
             case network_type_data:
                 // Find the correct connection and load data from the buffer
-                show_debug_message("Incoming Data Connection...");
                 connection_index = self.__findConnection(async_load[? "id"]);
-                var rawData = buffer_read(async_load[? "buffer"], buffer_text);
+                var rawData = buffer_read(async_load[? "buffer"], buffer_string);
 
                 // Parse the request
                 self.connections[connection_index].parseRequest(rawData);
+
+                var _id = self.connections[connection_index].connectionId; 
+                logger($"({ _id }) Received data");
+                
                 break;
 
             case network_type_disconnect:
@@ -77,6 +97,10 @@ function http () constructor {
                 self.connections[connection_index].connected      = false;
                 self.connections[connection_index].disconnectTime = current_time;
                 self.connections[connection_index].socket         = -1;
+                
+                var _id = self.connections[connection_index].connectionId; 
+                logger($"({ _id }) Disconnected");
+
                 break;
     
         }
@@ -121,7 +145,6 @@ function http () constructor {
         * @param {string} requestString - The raw HTTP request string.
         */
         parseRequest = function (requestString) {
-            show_debug_message($"Request data is coming in on connection {connectionId}");
           
             // Accumulate incoming data
             if (is_undefined(self.request.rawData)) {
@@ -132,12 +155,12 @@ function http () constructor {
           
             // If we're still in the header phase, process headers
             if (!self.bodyStarted) { 
-                var headerEndPos = string_pos("\r\n\r\n", self.request.rawData);
+                var headerEndPos = string_pos(http.EOL + http.EOL, self.request.rawData);
           
                 if (headerEndPos > 0) {
                     // Extract headers and transition to body parsing
                     var headerPart = string_copy(self.request.rawData, 1, headerEndPos);
-                    var bodyPart = string_copy(self.request.rawData, headerEndPos + 4, string_length(self.request.rawData) - headerEndPos - 4);
+                    var bodyPart = string_copy(self.request.rawData, headerEndPos + 4, string_length(self.request.rawData) - headerEndPos);
 
                     self.parseHeaders(headerPart);
                     self.bodyStarted = true;
@@ -155,8 +178,6 @@ function http () constructor {
                 var targetLength = int64(self.get("Content-Length"));
                 var currentLength = string_byte_length(self.request.body + "\n");
           
-                show_debug_message($"Connection {connectionId} request loading: {(currentLength / targetLength) * 100}% (current: { currentLength } vs target: { targetLength })");
-          
                 if (currentLength >= targetLength) {
                     self.hasRequest = true;
                 }
@@ -164,12 +185,76 @@ function http () constructor {
               // No Content-Length specified, consider the request complete
               self.hasRequest = true;
             }
-          
-            show_debug_message("Finished request method");
+
+            // Handle parsing of multipart form data
+            if (self.hasRequest && self.has("Content-Type")) {
+                var _originalContentType    = self.get("Content-Type");
+                var _arrayContentType       = string_split(_originalContentType, ";");
+                struct_set(self.request, "post", {});
+                switch (string_lower(_arrayContentType[0])) {
+                    case "multipart/form-data":
+                        var _boundary = "--" + string_split(string_trim(_arrayContentType[1]), "=")[1]; 
+                        var _bodyArr  = string_split(self.get("body"), _boundary, true);
+                        array_pop(_bodyArr); // The final array entry will have just the terminating "--" string and nothing else
+
+                        for (var i = 0; i < array_length(_bodyArr); i++) {
+                            var _entry       = string_trim(_bodyArr[i]);
+                            var _entryArr    = string_split(_entry, http.EOL + http.EOL);
+
+                            var _headers     = string_trim(_entryArr[0]);
+                            
+                            if (array_length(_entryArr) == 1) {
+                                array_push(_entryArr, "");
+                            }
+
+                            var _body        = string_trim(_entryArr[1]);
+
+                            var _name       = ""; 
+                            var _formStruct = {
+                                body : _body,
+                                toString : function() {
+                                    return body;
+                                }
+                            };
+
+                            // parse headers
+                            var _headersArr  = string_split(_headers, http.EOL);
+                            for (var h = 0; h < array_length(_headersArr); h++) {
+                                var _headerArr = string_split(_headersArr[h], ":");
+                                struct_set(_formStruct, string_lower(_headerArr[0]), string_trim(_headerArr[1]));
+                            }
+
+                            // Find content-disposition
+                            var _contentDisposition     = struct_get(_formStruct, "content-disposition");
+                            var _contentDispositionArr  = string_split(_contentDisposition, ";"); 
+                            for (var cd = 0; cd < array_length(_contentDispositionArr); cd++) {
+                                var _input = string_split(string_trim(_contentDispositionArr[cd]), "=");
+                                if (_input[0] == "name") {
+                                    _name = string_replace_all(_input[1], "\"", "");
+                                }
+                            }
+                            
+                            if (string_trim(_name) != "") {
+                                struct_set(self.request.post, string_lower(_name), _formStruct);
+                            }
+                        }
+                        break;
+
+                    case "application/x-www-form-urlencoded":
+                        var _bodyArr = string_split(self.get("body"), "&");
+                        for (var i = 0; i < array_length(_bodyArr); i++) {
+                            var _paramArr = string_split(_bodyArr[i], "=");
+                            if (string_trim(_paramArr[0]) != "") {
+                                struct_set(self.request.post, string_lower(_paramArr[0]), _paramArr[1]);
+                            }
+                        }
+                        break;
+                }
+            }
         };
 
         parseHeaders = function (headerString) {
-            var lines = string_split(headerString, "\r\n");
+            var lines = string_split(headerString, http.EOL);
 
             // Process request line
             var requestLine = array_shift(lines);
@@ -178,6 +263,24 @@ function http () constructor {
             self.request.uri = requestLineArray[1] ?? undefined;
             self.request.version = requestLineArray[2] ?? undefined;
 
+            // Process GET Parameters
+            var _uriArr = string_split(self.request.uri, "?");
+            self.request.uri = array_shift(_uriArr);
+            var _getStruct = {};
+            for(var i = 0; i < array_length(_uriArr); i++) {
+                _getArr = string_split(_uriArr[i], "&");
+                for(var g = 0; g < array_length(_getArr); g++) {
+                    _getPropArr = string_split(_getArr[g], "=");
+                    if (is_array(_getPropArr) && string_trim(_getPropArr[0]) != "") {
+                        struct_set(_getStruct, _getPropArr[0], array_length(_getPropArr) > 1 ? _getPropArr[1] : "");
+                    }
+                }
+            }
+            
+            if (struct_names_count(_getStruct)) {
+                struct_set(self.request, "get", _getStruct);
+            }
+            
             // Process headers
             for (var i = 0; i < array_length(lines); i++) {
                 var line = string_split(lines[i], ":");
@@ -194,9 +297,10 @@ function http () constructor {
         * @param {real} [status=404] - The HTTP status code.
         * @param {string} [content=""] - The response body content.
         * @param {array<array<string>>} [headers=[]] - Custom headers to include in the response.
-        * @param {boolean} [flush=true] - Specify if the connection's current request should be removed after responding.  
+        * @param {bool} [flush=true] - Specify if the connection's current request should be removed after responding.  
         */
         respond = function (status = 404, content = "", headers = [], flush = true) {
+
             // Start the header
             var header = "HTTP/1.1 " + string(status) + " " + http.__getStatusText(status) + http.EOL;
         
@@ -207,7 +311,7 @@ function http () constructor {
             var headerMap = [
                 ["Accept-ranges", "bytes"],
                 ["Date", http.__getCurrentGmt()],
-                ["Server", "GMHTTP/1.0"],
+                ["Server", "GM-HTTP"],
                 ["Content-Type", ["text/html", "charset=utf-8"]],
                 ["Content-Length", string(string_byte_length(content))],
                 ["Connection", "Keep-Alive"],
@@ -271,25 +375,46 @@ function http () constructor {
         /**
         * Checks if the request has a specific header or property.
         * @function has
-        * @param {string} key - The property key to check for.
-        * @returns {boolean} True if the key exists, false otherwise.
+        * @param {string} key - The property key to check for. 
+        * @returns {bool} True if the key exists, false otherwise.
         */
-        has = function (key) {
-            return struct_exists(self.request, string_lower(key));
+        has = function (key) { 
+            var _struct = struct_get(self, "request");
+            
+            if (string_count(".", key)) {
+                var _search = string_split(key, ".", false, 1);
+                if (array_length(_search) > 1) {
+                    _struct = struct_get(_struct, _search[0]);
+                    key     = _search[1];
+                }
+            }
+
+            return struct_exists(_struct, string_lower(key));
         }
         
         /**
         * Checks if the request has a specific header or property and returns it, or undefined
         * @function has
-        * @param {string} key - The property key to retrieve
-        * @returns {string|undefined} String if the key exists, undefined otherwise.
+        * @param {string} key - The property key to retrieve 
+        * @returns {string} String if the key exists, undefined otherwise.
         */
         get = function (key) {
+            
             if (self.has(key)) {
-                return struct_get(self.request, string_lower(key));
+                var _struct = struct_get(self, "request");   
+
+                if (string_count(".", key)) {
+                    var _search = string_split(key, ".", false, 1);
+                    if (array_length(_search) > 1) {
+                        _struct = struct_get(_struct, _search[0]);
+                        key     = _search[1];
+                    }
+                } 
+
+                return string(struct_get(_struct, string_lower(key)));
             }
             
-            return undefined;
+            return "";
         }
     }
 
