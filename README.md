@@ -35,11 +35,12 @@ In an `Async - Networking` event, we can intercept requests with the aptly named
 // Intercept and handle a network event
 var connection = server.intercept();
 
-if (!is_undefined(connection) && connection.hasRequest) {
+if (connection.hasRequest) {
     // Check the requested URI
     if (connection.get("uri") == "/example") {
         // Respond with a custom message
-        connection.respond(200, "Hello, World!");
+        var _name = connection.has("get.name") ? connection.get("get.name") : "World"; 
+        connection.respond(200, $"Hello, { _name }!");
     } else {
         // Respond with 404 if not found
         connection.respond(404, "Page not found");
@@ -50,6 +51,8 @@ if (!is_undefined(connection) && connection.hasRequest) {
 In the code above, server.intercept() will return the relevant connection instance when it detects any event from it.
 
 In this case, when the connection has a request, we're checking to see if it's looking for the resource at `/example` (http://localhost:8080/example, if you're following this guide) and return that resource to the client. If it's not, it will return a basic 404 page.
+
+We're also checking to see if the client may have provided a "name" attribute in the GET request... so if we go to http://localhost:8080/example?name=Sam you might see something different!
 
 Pretty cool, right?
 
@@ -76,9 +79,11 @@ server.remove();
 ## Diving Deeper
 ### http() constructor
 The http() constructor is the container for all things related to **gm-http**.
+You can call the initial `new http()` with a boolean like `new http(true)` to control whether or not verbose logging is on (default false, for off).
+
 | Method | Arguments | Returns | Explanation |
 |--|--|--|--|
-| listen() | port (int) | Network Socket ID (real) | Creates a new listener on the specified port. If this method returns a number below 0, it means the creation of the server on the specified port has failed. Each instance of http() may only have one active listener at a time, so calling this again will handle removal automatically whenever necessary. |
+| listen() | port (int) | Network Socket ID (real) or `undefined` | Creates a new listener on the specified port. If this method returns a number below 0, it means the creation of the server on the specified port has failed. Each instance of http() may only have one active listener at a time, so calling this again will handle removal automatically whenever necessary. |
 |remove()|*[none]*|*[none]*|Destroys the currently active listener, if it exists.|
 |intercept()|*[none]*|`connection`|Manages the states of all `connection` instances during events like client connecting, disconnecting, and sending data. Triggers parsing of requests (`connection.parseRequest(data)`) for each instance.|
 |reap()|*[none]*|*[none]*|Removes inactive `connection` instances from the server instance.|
@@ -91,10 +96,10 @@ The connection() constructor contains all data related to a connection, stored i
 | connectionId | Unique ID of the connection | A consistent ID for the connection throughout and after it's lifetime |
 | socket | Network Socket ID (real) | The socket that this connection is on |
 | connectTime | current_time at connection start (real) | The precise moment when the connection started |
-| disconnectTime | current_time at connection end (real) OR undefined | The precise moment when the connection ended |
-|connected|boolean| Whether or not this connection is currently active
+| disconnectTime | current_time at connection end (real) OR `undefined` | The precise moment when the connection ended |
+|connected |boolean| Whether or not this connection is currently active
 | hasRequest | boolean | If the connection has a request or not |
-| body | boolean | Largely for internal use - if the request parser has switched from writing headers to writing into the body of the message |
+| bodyStarted | boolean | Largely for internal use - if the request parser has switched from writing headers to writing into the body of the message |
 | request | struct | Contains all request attributes and a request body if applicable |
 
 While you can use these to directly manipulate the connection, and ultimately add more variables to store with the specific connection, there are a number of methods that assist with connection handling available on any connection() instance:
@@ -102,7 +107,7 @@ While you can use these to directly manipulate the connection, and ultimately ad
 | Method | Arguments | Returns | Explanation |
 |--|--|--|--|
 |has()| request attribute (string)| boolean | Check if an attribute exists in the current request. Example: `connection.has("method")`|
-|get()| request attribute (string)| string / undefined | Return a value from the request, if it exists. Example: `connection.get("method")` might return `GET`, `POST`, etc. or `undefined` if it has not yet been set |
+|get()| request attribute (string)| string | Return a value from the request, if it exists. Example: `connection.get("method")` might return `GET`, `POST`, etc. or an empty string if it has not yet been set |
 | respond() | [HTTP Status Code](https://www.iana.org/assignments/http-status-codes/http-status-codes.xhtml) (int, default `404`), content (string, default empty), headers (array, default empty), flush (boolean, default true)|[none]|This method builds and sends a valid HTTP response to the connection with a status code, body, and overwrite-able default header segment (see below for more on custom headers). The flush property defines if the current request will be cleared automatically when you respond.
 | remove() | [none] | [none] | While a client disconnect will make the connection stale, in certain scenarios you may wish to "hang up" on a connection from the server side. |
 | parseRequest() | HTTP Request (string) | [none] | Builds the connection's `request` struct from a string. In most cases, you do not need to call this method directly as [http].intercept will do it for you. | 
@@ -119,14 +124,19 @@ These attributes (and usually other headers) live in the `request` struct of a `
 
 By design, all gm-http `connection.request` structs contain a `body` entry - by design of HTTP, it is rare (and ultimately very non-standard) to have any body content for request methods like `GET`, but in any method that would expect a body (like `POST`), the `request.body` entry is represented as a string.
 
-Currently gm-http does not handle any parsing of the body content for you, but this may be an area of future additions built into the library.
+As of version 1.1.0, GM-HTTP creates `get.` and `post.` structs within the `connection.request` struct.
+
+`get.` is comprised of any query strings that follow your URI - for example, in the case of http://localhost:8080/example?name=Brian - you are able to easily access the `name` query string by calling `connection.get("get.name")`.
+
+`post.` is comprised of any `multipart/form-data` or `multipart/x-www-form-urlencoded` data which has been sent with the request. For example, an HTML form submission might have a "username" field that you can access by typing `connection.get("post.username")`. Each struct within the `post.` struct often contains additional information in the case of a `multipart/form-data` submission, which you can access directly with something like: `connection.request.post.[property]`.
+
 
 ### Response Headers
 gm-http defines a default set of response HTTP headers below your response status, specifically these ones:
 ```http
 Accept-ranges: bytes
 Date: [current formatted time]
-Server: GMHTTP/1.0
+Server: GM-HTTP
 Content-Type: text/html; charset=utf-8
 Content-Length: [the byte length of your supplied content]
 Connection: Keep-Alive
